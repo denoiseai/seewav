@@ -267,20 +267,21 @@ def main():
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as tmp:
         visualize(args.audio,
-                  Path(tmp),
-                  args.out,
-                  seek=args.seek,
-                  duration=args.duration,
-                  rate=args.rate,
-                  bars=args.bars,
-                  speed=args.speed,
-                  oversample=args.oversample,
-                  time=args.time,
-                  fg_color=args.color,
-                  fg_color2=args.color2,
-                  bg_color=[1. * bool(args.white)] * 3,
-                  size=(args.width, args.height),
-                  stereo=args.stereo)
+            Path(tmp),
+            args.out,
+            seek=args.seek,
+            duration=args.duration,
+            rate=args.rate,
+            bars=args.bars,
+            speed=args.speed,
+            oversample=args.oversample,
+            time_param=args.time,  # Actualizado aquí también
+            fg_color=args.color,
+            fg_color2=args.color2,
+            bg_color=[1. * bool(args.white)] * 3,
+            size=(args.width, args.height),
+            stereo=args.stereo)
+
 
 
 if __name__ == "__main__":
