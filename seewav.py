@@ -68,7 +68,7 @@ def sigmoid(x):
 
 kernel_code_fusion = '''
 extern "C" __global__
-void compute_envelope_fusion(const float* __restrict__ wav, float* __restrict__ out, int n, int window, int stride, const float* smooth) {
+void compute_envelope_fusion(const float* __restrict__ wav, float* __restrict__ out, int n, int window, int stride) {
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
     if (idx >= n) return;
 
@@ -78,20 +78,20 @@ void compute_envelope_fusion(const float* __restrict__ wav, float* __restrict__ 
         sum += max(0.0f, wav[pos]);
     }
     float envelope = 1.9f * (1.0f / (1.0f + expf(-2.5f * (sum / window))) - 0.5f);
-    out[idx] = envelope * smooth[idx % window];  // Aplica suavizado directamente en GPU
+    out[idx] = envelope;
 }
 '''
 
 kernel_fusion = cp.RawKernel(kernel_code_fusion, 'compute_envelope_fusion')
 
 
-def envelope_gpu_optimized(wav, window, stride, smooth):
+def envelope_gpu_optimized(wav, window, stride):
     n = (wav.size - window) // stride + 1
     out = cp.zeros(n, dtype=cp.float32)
     threads_per_block = 256
     blocks = (n + threads_per_block - 1) // threads_per_block
 
-    kernel_fusion((blocks,), (threads_per_block,), (wav, out, wav.size, window, stride, smooth))
+    kernel_fusion((blocks,), (threads_per_block,), (wav, out, wav.size, window, stride))
     return out
 
 
@@ -131,6 +131,7 @@ def draw_env(envs, out, fg_colors, bg_color, size):
 
 def interpole(x1, y1, x2, y2, x):
     return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+
 
 def visualize(audio,
               tmp,
@@ -172,31 +173,39 @@ def visualize(audio,
     envs = []
     for wav in wavs:
         env = envelope_gpu_optimized(cp.array(wav), window, stride)
-        env = cp.pad(env, (bars // 2, 2 * bars))  # Ajusta `bars` siempre con pad
-        envs.append(cp.asnumpy(env))  # Para cairo numpy
+        env = cp.pad(env, (0, 2 * bars))  # Ajustar padding
+        envs.append(cp.asnumpy(env))  # Convertimos a NumPy para Cairo
 
     duration = len(wavs[0]) / sr
     frames = int(rate * duration)
-    smooth = cp.hanning(bars)  # Asegura el cálculo 30 ajustable
 
     print("Generating the frames...")
+    smooth = cp.hanning(bars)
     for idx in tqdm.tqdm(range(frames), unit=" frames", ncols=80):
-        pos = (((idx / rate)) * sr) / stride / bars
+        pos = idx * bars
         off = int(pos)
-        loc = pos - off
         denvs = []
         for env in envs:
-            env1 = cp.array(env[off * bars:(off + 1) * bars])
-            env2 = cp.array(env[(off + 1) * bars:(off + 2) * bars])
+            if off + 1 + bars > len(env):
+                break
+
+            env1 = cp.array(env[off:off + bars])
+            env2 = cp.array(env[off + 1:off + 1 + bars])
+
             maxvol = cp.log10(1e-4 + env2.max()) * 10
-            speedup = cp.clip(interpole(-6, 0.5, 0, 2, maxvol), 0.5, 2)
+            speedup = cp.clip(interpole(-6, 0.5, 0, 2, maxvol.item()), 0.5, 2)
+            loc = 0
+
             w = sigmoid(speed * speedup * (loc - 0.5))
+
             denv = (1 - w) * env1 + w * env2
             denv *= smooth
-            denvs.append(cp.asnumpy(denv))  # Guardar completamente compatible para Frame
-            
-        draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
+            denvs.append(cp.asnumpy(denv))
 
+        if not denvs:
+            continue
+
+        draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
 
     audio_cmd = []
     if seek is not None:
