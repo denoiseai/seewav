@@ -193,9 +193,12 @@ def visualize(audio,
             env2 = cp.array(env[off + 1:off + 1 + bars])
 
             maxvol = cp.log10(1e-4 + env2.max()) * 10
-            speedup = cp.clip(interpole(-6, 0.5, 0, 2, maxvol.item()), 0.5, 2)
-            loc = 0
+            maxvol = maxvol.item()  # Convertir a escalar de Python
 
+            # Reemplaza cp.clip por max y min
+            speedup = max(0.5, min(2, interpole(-6, 0.5, 0, 2, maxvol)))
+
+            loc = 0
             w = sigmoid(speed * speedup * (loc - 0.5))
 
             denv = (1 - w) * env1 + w * env2
@@ -206,6 +209,7 @@ def visualize(audio,
             continue
 
         draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
+
 
     audio_cmd = []
     if seek is not None:
