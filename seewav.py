@@ -123,7 +123,7 @@ def visualize(audio,
               rate=60,
               bars=50,
               speed=4,
-              time=0.4,
+              time_param=0.4,  # Actualizado a `time_param`
               oversample=3,
               fg_color=(.2, .2, .2),
               fg_color2=(.5, .3, .6),
@@ -150,7 +150,7 @@ def visualize(audio,
     for i, wav in enumerate(wavs):
         wavs[i] = wav / wav.std()
 
-    window = int(sr * time / bars)
+    window = int(sr * time_param / bars)
     stride = int(window / oversample)
 
     envs = []
@@ -267,21 +267,20 @@ def main():
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as tmp:
         visualize(args.audio,
-            Path(tmp),
-            args.out,
-            seek=args.seek,
-            duration=args.duration,
-            rate=args.rate,
-            bars=args.bars,
-            speed=args.speed,
-            oversample=args.oversample,
-            time_param=args.time,  # Actualizado aquí también
-            fg_color=args.color,
-            fg_color2=args.color2,
-            bg_color=[1. * bool(args.white)] * 3,
-            size=(args.width, args.height),
-            stereo=args.stereo)
-
+                  Path(tmp),
+                  args.out,
+                  seek=args.seek,
+                  duration=args.duration,
+                  rate=args.rate,
+                  bars=args.bars,
+                  speed=args.speed,
+                  oversample=args.oversample,
+                  time_param=args.time,  # Se envía correctamente
+                  fg_color=args.color,
+                  fg_color2=args.color2,
+                  bg_color=[1. * bool(args.white)] * 3,
+                  size=(args.width, args.height),
+                  stereo=args.stereo)
 
 
 if __name__ == "__main__":
