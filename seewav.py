@@ -66,9 +66,9 @@ def sigmoid(x):
     return 1 / (1 + cp.exp(-x))
 
 
-kernel_code = '''
+kernel_code_fusion = '''
 extern "C" __global__
-void compute_envelope(const float* __restrict__ wav, float* __restrict__ out, int n, int window, int stride) {
+void compute_envelope_fusion(const float* __restrict__ wav, float* __restrict__ out, int n, int window, int stride, const float* smooth) {
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
     if (idx >= n) return;
 
@@ -77,20 +77,21 @@ void compute_envelope(const float* __restrict__ wav, float* __restrict__ out, in
         int pos = idx * stride + i;
         sum += max(0.0f, wav[pos]);
     }
-    out[idx] = 1.9f * (1.0f / (1.0f + expf(-2.5f * (sum / window))) - 0.5f);
+    float envelope = 1.9f * (1.0f / (1.0f + expf(-2.5f * (sum / window))) - 0.5f);
+    out[idx] = envelope * smooth[idx % window];  // Aplica suavizado directamente en GPU
 }
 '''
 
-kernel = cp.RawKernel(kernel_code, 'compute_envelope')
+kernel_fusion = cp.RawKernel(kernel_code_fusion, 'compute_envelope_fusion')
 
 
-def envelope_gpu_optimized(wav, window, stride):
+def envelope_gpu_optimized(wav, window, stride, smooth):
     n = (wav.size - window) // stride + 1
     out = cp.zeros(n, dtype=cp.float32)
     threads_per_block = 256
     blocks = (n + threads_per_block - 1) // threads_per_block
 
-    kernel((blocks,), (threads_per_block,), (wav, out, wav.size, window, stride))
+    kernel_fusion((blocks,), (threads_per_block,), (wav, out, wav.size, window, stride, smooth))
     return out
 
 
@@ -168,17 +169,17 @@ def visualize(audio,
 
     window = int(sr * time / bars)
     stride = int(window / oversample)
+    smooth = cp.hanning(window)  # Suavizado directamente en GPU
 
     envs = []
     for wav in wavs:
         with cp.cuda.Stream(non_blocking=True):
-            env = envelope_gpu_optimized(cp.array(wav), window, stride)
+            env = envelope_gpu_optimized(cp.array(wav), window, stride, smooth)
             env = cp.pad(env, (bars // 2, 2 * bars))
-            envs.append(cp.asnumpy(env))  # Convertir a NumPy para Cairo
+            envs.append(cp.asnumpy(env))  # Convertimos a NumPy para Cairo
 
     duration = len(wavs[0]) / sr
     frames = int(rate * duration)
-    smooth = cp.hanning(bars)  # Generar Hanning directamente en GPU
 
     print("Generating the frames...")
     for idx in tqdm.tqdm(range(frames), unit=" frames", ncols=80):
@@ -298,4 +299,3 @@ def main():
 if __name__ == "__main__":
     _is_main = True
     main()
-
