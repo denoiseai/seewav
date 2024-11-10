@@ -4,7 +4,6 @@ import math
 import subprocess as sp
 import sys
 import tempfile
-import threading  # Importar threading para manejar hilos
 import time  # Importar time para medir tiempos
 from pathlib import Path
 
@@ -135,6 +134,7 @@ def visualize(audio,
               bg_color=(1, 1, 1),
               size=(400, 400),
               stereo=False,
+              batch_size=1000
               ):
     start_time = time.time()  # Tiempo de inicio total
     try:
@@ -172,54 +172,45 @@ def visualize(audio,
 
     print("Generating the frames...")
 
-    # Dividir el proceso en 10 partes y utilizar CuPy Streams
-    num_parts = 10
-    frames_per_part = frames // num_parts
-    remaining_frames = frames % num_parts
-
-    streams = [cp.cuda.Stream() for _ in range(num_parts)]
-
-    # Crear una barra de progreso compartida
     pbar = tqdm.tqdm(total=frames, unit=" frames", ncols=80)
-    pbar_lock = threading.Lock()  # Lock para proteger actualizaciones concurrentes
 
-    def process_part(part_idx):
-        stream = streams[part_idx]
-        start_frame = part_idx * frames_per_part
-        end_frame = start_frame + frames_per_part
-        if part_idx == num_parts - 1:
-            end_frame += remaining_frames  # Añadir los frames restantes al último lote
+    for batch_start in range(0, frames, batch_size):
+        batch_end = min(batch_start + batch_size, frames)
+        batch_indices = cp.arange(batch_start, batch_end)
 
-        with stream:
-            for idx in range(start_frame, end_frame):
-                pos = (((idx / rate)) * sr) / stride / bars
-                off = int(pos)
-                loc = pos - off
-                denvs = []
-                for env in envs:
-                    env1 = env[off * bars:(off + 1) * bars]
-                    env2 = env[(off + 1) * bars:(off + 2) * bars]
-                    maxvol = cp.log10(1e-4 + env2.max()) * 10
-                    maxvol = maxvol.item()  # Convertir a escalar de Python
-                    speedup = max(0.5, min(2, interpole(-6, 0.5, 0, 2, maxvol)))
-                    w = sigmoid(speed * speedup * (loc - 0.5))
-                    denv = (1 - w) * env1 + w * env2
-                    denv *= smooth
-                    denvs.append(cp.asnumpy(denv))
-                draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
-                with pbar_lock:
-                    pbar.update(1)
+        pos = (((batch_indices / rate)) * sr) / stride / bars
+        off = pos.astype(cp.int32)
+        loc = pos - off
 
-    # Lanzar los procesos en paralelo
-    threads = []
-    for i in range(num_parts):
-        t = threading.Thread(target=process_part, args=(i,))
-        t.start()
-        threads.append(t)
+        denvs_list = []
+        for env in envs:
+            idx1 = off * bars
+            idx2 = (off + 1) * bars
 
-    # Esperar a que todos los threads terminen
-    for t in threads:
-        t.join()
+            max_idx = len(env) - bars
+            idx1 = cp.clip(idx1, 0, max_idx)
+            idx2 = cp.clip(idx2, 0, max_idx)
+
+            env1 = cp.stack([env[i:i + bars] for i in idx1.get()])
+            env2 = cp.stack([env[i:i + bars] for i in idx2.get()])
+
+            maxvol = cp.log10(1e-4 + env2.max(axis=1)) * 10
+            maxvol = maxvol.get()  # Convertir a NumPy array
+            speedup = np.clip(interpole(-6, 0.5, 0, 2, maxvol), 0.5, 2)
+
+            w = sigmoid(speed * speedup * (loc - 0.5))
+            w = w[:, cp.newaxis]  # Ajustar dimensiones para broadcasting
+
+            denv = (1 - w) * env1 + w * env2
+            denv *= smooth  # Broadcasting con smooth
+
+            denvs_list.append(denv)
+
+        num_frames = batch_end - batch_start
+        for i in range(num_frames):
+            denvs = [cp.asnumpy(denv[i]) for denv in denvs_list]
+            draw_env(denvs, tmp / f"{batch_start + i:06d}.png", (fg_color, fg_color2), bg_color, size)
+        pbar.update(num_frames)
 
     pbar.close()  # Cerrar la barra de progreso
 
@@ -298,6 +289,8 @@ def main():
                         help="height in pixels of the animation")
     parser.add_argument("-s", "--seek", type=float, help="Seek to time in seconds in video.")
     parser.add_argument("-d", "--duration", type=float, help="Duration in seconds from seek time.")
+    parser.add_argument("--batch_size", type=int, default=1000,
+                        help="Number of frames to process in each batch.")
     parser.add_argument("audio", type=Path, help='Path to audio file')
     parser.add_argument("out",
                         type=Path,
@@ -320,7 +313,8 @@ def main():
                   fg_color2=args.color2,
                   bg_color=[1. * bool(args.white)] * 3,
                   size=(args.width, args.height),
-                  stereo=args.stereo)
+                  stereo=args.stereo,
+                  batch_size=args.batch_size)
         print(f"Video saved to {args.out.resolve()}")
 
 
