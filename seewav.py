@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# This is free and unencumbered software released into the public domain. For more detail,
-# see the LICENCE file at https://github.com/adefossez/seewav
-# Original author: adefossez
-"""
-Generates a nice waveform visualization from an audio file, save it as a mp4 file.
-"""
 import argparse
 import json
 import math
@@ -14,27 +7,20 @@ import tempfile
 from pathlib import Path
 
 import cairo
-import numpy as np
+import cupy as cp  # CuPy para cálculos en GPU
+import numpy as np  # Necesario para interoperabilidad y formato final
 import tqdm
 
 _is_main = False
 
 
 def colorize(text, color):
-    """
-    Wrap `text` with ANSI `color` code. See
-    https://stackoverflow.com/questions/4842424/list-of-ansi-color-escape-sequences
-    """
     code = f"\033[{color}m"
     restore = "\033[0m"
     return "".join([code, text, restore])
 
 
 def fatal(msg):
-    """
-    Something bad happened. Does nothing if this module is not __main__.
-    Display an error message and abort.
-    """
     if _is_main:
         head = "error: "
         if sys.stderr.isatty():
@@ -44,34 +30,23 @@ def fatal(msg):
 
 
 def read_info(media):
-    """
-    Return some info on the media file.
-    """
     proc = sp.run([
         'ffprobe', "-loglevel", "panic",
         str(media), '-print_format', 'json', '-show_format', '-show_streams'
-    ],
-                  capture_output=True)
+    ], capture_output=True)
     if proc.returncode:
         raise IOError(f"{media} does not exist or is of a wrong type.")
     return json.loads(proc.stdout.decode('utf-8'))
 
 
 def read_audio(audio, seek=None, duration=None):
-    """
-    Read the `audio` file, starting at `seek` (or 0) seconds for `duration` (or all)  seconds.
-    Returns `float[channels, samples]`.
-    """
-
     info = read_info(audio)
-    channels = None
     stream = info['streams'][0]
     if stream["codec_type"] != "audio":
         raise ValueError(f"{audio} should contain only audio.")
     channels = stream['channels']
     samplerate = float(stream['sample_rate'])
 
-    # Good old ffmpeg
     command = ['ffmpeg', '-y']
     command += ['-loglevel', 'panic']
     if seek is not None:
@@ -88,33 +63,24 @@ def read_audio(audio, seek=None, duration=None):
 
 
 def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
+    return 1 / (1 + cp.exp(-x))
 
 
-def envelope(wav, window, stride):
+def envelope_gpu(wav, window, stride):
     """
-    Extract the envelope of the waveform `wav` (float[samples]), using average pooling
-    with `window` samples and the given `stride`.
+    Extract the envelope of the waveform `wav` (float[samples]) using GPU.
     """
-    # pos = np.pad(np.maximum(wav, 0), window // 2)
-    wav = np.pad(wav, window // 2)
+    wav = cp.pad(wav, window // 2)
     out = []
     for off in range(0, len(wav) - window, stride):
         frame = wav[off:off + window]
-        out.append(np.maximum(frame, 0).mean())
-    out = np.array(out)
-    # Some form of audio compressor based on the sigmoid.
+        out.append(cp.maximum(frame, 0).mean())
+    out = cp.array(out)
     out = 1.9 * (sigmoid(2.5 * out) - 0.5)
     return out
 
 
 def draw_env(envs, out, fg_colors, bg_color, size):
-    """
-    Internal function, draw a single frame (two frames for stereo) using cairo and save
-    it to the `out` file as png. envs is a list of envelopes over channels, each env
-    is a float[bars] representing the height of the envelope to draw. Each entry will
-    be represented by a bar.
-    """
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, *size)
     ctx = cairo.Context(surface)
     ctx.scale(*size)
@@ -123,9 +89,9 @@ def draw_env(envs, out, fg_colors, bg_color, size):
     ctx.rectangle(0, 0, 1, 1)
     ctx.fill()
 
-    K = len(envs) # Number of waves to draw (waves are stacked vertically)
-    T = len(envs[0]) # Numbert of time steps
-    pad_ratio = 0.1 # spacing ratio between 2 bars
+    K = len(envs)
+    T = len(envs[0])
+    pad_ratio = 0.1
     width = 1. / (T * (1 + 2 * pad_ratio))
     pad = pad_ratio * width
     delta = 2 * pad + width
@@ -133,9 +99,9 @@ def draw_env(envs, out, fg_colors, bg_color, size):
     ctx.set_line_width(width)
     for step in range(T):
         for i in range(K):
-            half = 0.5 * envs[i][step] # (semi-)height of the bar
-            half /= K # as we stack K waves vertically
-            midrule = (1+2*i)/(2*K) # midrule of i-th wave
+            half = 0.5 * envs[i][step]
+            half /= K
+            midrule = (1 + 2 * i) / (2 * K)
             ctx.set_source_rgb(*fg_colors[i])
             ctx.move_to(pad + step * delta, midrule - half)
             ctx.line_to(pad + step * delta, midrule)
@@ -168,29 +134,12 @@ def visualize(audio,
               size=(400, 400),
               stereo=False,
               ):
-    """
-    Generate the visualisation for the `audio` file, using a `tmp` folder and saving the final
-    video in `out`.
-    `seek` and `durations` gives the extract location if any.
-    `rate` is the framerate of the output video.
-
-    `bars` is the number of bars in the animation.
-    `speed` is the base speed of transition. Depending on volume, actual speed will vary
-        between 0.5 and 2 times it.
-    `time` amount of audio shown at once on a frame.
-    `oversample` higher values will lead to more frequent changes.
-    `fg_color` is the rgb color to use for the foreground.
-    `fg_color2` is the rgb color to use for the second wav if stereo is set.
-    `bg_color` is the rgb color to use for the background.
-    `size` is the `(width, height)` in pixels to generate.
-    `stereo` is whether to create 2 waves.
-    """
     try:
         wav, sr = read_audio(audio, seek=seek, duration=duration)
     except (IOError, ValueError) as err:
         fatal(err)
         raise
-    # wavs is a list of wav over channels
+
     wavs = []
     if stereo:
         assert wav.shape[0] == 2, 'stereo requires stereo audio file'
@@ -201,16 +150,16 @@ def visualize(audio,
         wavs.append(wav)
 
     for i, wav in enumerate(wavs):
-        wavs[i] = wav/wav.std()
+        wavs[i] = wav / wav.std()
 
     window = int(sr * time / bars)
     stride = int(window / oversample)
-    # envs is a list of env over channels
+
     envs = []
     for wav in wavs:
-        env = envelope(wav, window, stride)
-        env = np.pad(env, (bars // 2, 2 * bars))
-        envs.append(env)
+        env = envelope_gpu(cp.array(wav), window, stride)
+        env = cp.pad(env, (bars // 2, 2 * bars))
+        envs.append(cp.asnumpy(env))  # Convertimos a NumPy para compatibilidad con Cairo
 
     duration = len(wavs[0]) / sr
     frames = int(rate * duration)
@@ -223,16 +172,14 @@ def visualize(audio,
         loc = pos - off
         denvs = []
         for env in envs:
-            env1 = env[off * bars:(off + 1) * bars]
-            env2 = env[(off + 1) * bars:(off + 2) * bars]
-
-            # we want loud parts to be updated faster
+            env1 = cp.array(env[off * bars:(off + 1) * bars])  # Asegúrate de que sea CuPy array
+            env2 = cp.array(env[(off + 1) * bars:(off + 2) * bars])  # También CuPy array
             maxvol = math.log10(1e-4 + env2.max()) * 10
             speedup = np.clip(interpole(-6, 0.5, 0, 2, maxvol), 0.5, 2)
-            w = sigmoid(speed * speedup * (loc - 0.5))
-            denv = (1 - w) * env1 + w * env2
-            denv *= smooth
-            denvs.append(denv)
+            w = cp.array(sigmoid(speed * speedup * (loc - 0.5)))  # Convierte a CuPy si no lo es
+            denv = (1 - w) * env1 + w * env2  # Todas operaciones con CuPy
+            denv *= cp.array(smooth)  # smooth también debería estar en CuPy
+            denvs.append(cp.asnumpy(denv))  # Convierte a NumPy para dibujar
         draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
 
     audio_cmd = []
@@ -242,12 +189,11 @@ def visualize(audio,
     if duration is not None:
         audio_cmd += ["-t", str(duration)]
     print("Encoding the animation video... ")
-    # https://hamelot.io/visualization/using-ffmpeg-to-convert-a-set-of-images-into-a-video/
     sp.run([
         "ffmpeg", "-y", "-loglevel", "panic", "-r",
         str(rate), "-f", "image2", "-s", f"{size[0]}x{size[1]}", "-i", "%06d.png"
     ] + audio_cmd + [
-        "-c:a", "aac", "-vcodec", "libx264", "-crf", "10", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-vcodec", "h264_nvenc", "-crf", "10", "-pix_fmt", "yuv420p",
         out.resolve()
     ],
            check=True,
@@ -255,9 +201,6 @@ def visualize(audio,
 
 
 def parse_color(colorstr):
-    """
-    Given a comma separated rgb(a) colors, returns a 4-tuple of float.
-    """
     try:
         r, g, b = [float(i) for i in colorstr.split(",")]
         return r, g, b
