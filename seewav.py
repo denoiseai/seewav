@@ -132,14 +132,13 @@ def draw_env(envs, out, fg_colors, bg_color, size):
 def interpole(x1, y1, x2, y2, x):
     return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
 
-
 def visualize(audio,
               tmp,
               out,
               seek=None,
               duration=None,
-              rate=60,
-              bars=50,
+              rate=30,
+              bars=30,
               speed=4,
               time=0.4,
               oversample=3,
@@ -157,7 +156,7 @@ def visualize(audio,
 
     wavs = []
     if stereo:
-        assert wav.shape[0] == 2, 'stereo requires stereo audio file'
+        assert wav.shape[0] == 2, 'Stereo requires stereo input audio.'
         wavs.append(wav[0])
         wavs.append(wav[1])
     else:
@@ -169,17 +168,16 @@ def visualize(audio,
 
     window = int(sr * time / bars)
     stride = int(window / oversample)
-    smooth = cp.hanning(window)  # Suavizado directamente en GPU
 
     envs = []
     for wav in wavs:
-        with cp.cuda.Stream(non_blocking=True):
-            env = envelope_gpu_optimized(cp.array(wav), window, stride, smooth)
-            env = cp.pad(env, (bars // 2, 2 * bars))
-            envs.append(cp.asnumpy(env))  # Convertimos a NumPy para Cairo
+        env = envelope_gpu_optimized(cp.array(wav), window, stride)
+        env = cp.pad(env, (bars // 2, 2 * bars))  # Ajusta `bars` siempre con pad
+        envs.append(cp.asnumpy(env))  # Para cairo numpy
 
     duration = len(wavs[0]) / sr
     frames = int(rate * duration)
+    smooth = cp.hanning(bars)  # Asegura el cálculo 30 ajustable
 
     print("Generating the frames...")
     for idx in tqdm.tqdm(range(frames), unit=" frames", ncols=80):
@@ -188,15 +186,17 @@ def visualize(audio,
         loc = pos - off
         denvs = []
         for env in envs:
-            env1 = cp.array(env[off * bars:(off + 1) * bars])  # Asegura la longitud 'bars'
+            env1 = cp.array(env[off * bars:(off + 1) * bars])
             env2 = cp.array(env[(off + 1) * bars:(off + 2) * bars])
             maxvol = cp.log10(1e-4 + env2.max()) * 10
             speedup = cp.clip(interpole(-6, 0.5, 0, 2, maxvol), 0.5, 2)
             w = sigmoid(speed * speedup * (loc - 0.5))
             denv = (1 - w) * env1 + w * env2
-            denv *= smooth  # Asegúrate de que `smooth` coincida con las dimensiones aquí.
-            denvs.append(cp.asnumpy(denv))  # Para compatibilidad con Cairo 
+            denv *= smooth
+            denvs.append(cp.asnumpy(denv))  # Guardar completamente compatible para Frame
+            
         draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
+
 
     audio_cmd = []
     if seek is not None:
