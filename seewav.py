@@ -123,7 +123,7 @@ def visualize(audio,
               rate=60,
               bars=50,
               speed=4,
-              time=0.4,  # Ahora `time` coincide
+              time_frame=0.4,  # Renombrado de `time` a `time_frame`
               oversample=3,
               fg_color=(.2, .2, .2),
               fg_color2=(.5, .3, .6),
@@ -150,7 +150,7 @@ def visualize(audio,
     for i, wav in enumerate(wavs):
         wavs[i] = wav / wav.std()
 
-    window = int(sr * time / bars)
+    window = int(sr * time_frame / bars)
     stride = int(window / oversample)
 
     envs = []
@@ -275,7 +275,7 @@ def main():
                   bars=args.bars,
                   speed=args.speed,
                   oversample=args.oversample,
-                  time=args.time,  # Aseguramos consistencia aquí
+                  time_frame=args.time,  # Consistencia en el nombre
                   fg_color=args.color,
                   fg_color2=args.color2,
                   bg_color=[1. * bool(args.white)] * 3,
