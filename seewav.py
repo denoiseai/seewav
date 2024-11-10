@@ -4,6 +4,8 @@ import math
 import subprocess as sp
 import sys
 import tempfile
+import threading  # Importar threading para manejar hilos
+import time  # Importar time para medir tiempos
 from pathlib import Path
 
 import cairo
@@ -126,7 +128,7 @@ def visualize(audio,
               rate=60,
               bars=50,
               speed=4,
-              time=0.4,
+              time_param=0.4,
               oversample=3,
               fg_color=(.2, .2, .2),
               fg_color2=(.5, .3, .6),
@@ -134,6 +136,7 @@ def visualize(audio,
               size=(400, 400),
               stereo=False,
               ):
+    start_time = time.time()  # Tiempo de inicio total
     try:
         wav, sr = read_audio(audio, seek=seek, duration=duration)
     except (IOError, ValueError) as err:
@@ -152,7 +155,7 @@ def visualize(audio,
     for i, wav in enumerate(wavs):
         wavs[i] = wav / wav.std()
 
-    window = int(sr * time / bars)
+    window = int(sr * time_param / bars)
     stride = int(window / oversample)
 
     # Convertir wavs a CuPy arrays y procesar la envolvente en GPU
@@ -176,8 +179,9 @@ def visualize(audio,
 
     streams = [cp.cuda.Stream() for _ in range(num_parts)]
 
-    # Crear una lista para almacenar los resultados de cada parte
-    results = [None] * num_parts
+    # Crear una barra de progreso compartida
+    pbar = tqdm.tqdm(total=frames, unit=" frames", ncols=80)
+    pbar_lock = threading.Lock()  # Lock para proteger actualizaciones concurrentes
 
     def process_part(part_idx):
         stream = streams[part_idx]
@@ -203,10 +207,10 @@ def visualize(audio,
                     denv *= smooth
                     denvs.append(cp.asnumpy(denv))
                 draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
+                with pbar_lock:
+                    pbar.update(1)
 
     # Lanzar los procesos en paralelo
-    import threading
-
     threads = []
     for i in range(num_parts):
         t = threading.Thread(target=process_part, args=(i,))
@@ -216,6 +220,12 @@ def visualize(audio,
     # Esperar a que todos los threads terminen
     for t in threads:
         t.join()
+
+    pbar.close()  # Cerrar la barra de progreso
+
+    end_time = time.time()  # Tiempo de finalización total
+    total_time = end_time - start_time
+    print(f"Total processing time: {total_time:.2f} seconds")
 
     audio_cmd = []
     if seek is not None:
@@ -233,6 +243,7 @@ def visualize(audio,
     ],
            check=True,
            cwd=tmp)
+    print(f"Video saved to {out.resolve()}")
 
 
 def parse_color(colorstr):
@@ -304,7 +315,7 @@ def main():
                   bars=args.bars,
                   speed=args.speed,
                   oversample=args.oversample,
-                  time=args.time,
+                  time_param=args.time,
                   fg_color=args.color,
                   fg_color2=args.color2,
                   bg_color=[1. * bool(args.white)] * 3,
