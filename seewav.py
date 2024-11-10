@@ -188,14 +188,14 @@ def visualize(audio,
         loc = pos - off
         denvs = []
         for env in envs:
-            env1 = cp.array(env[off * bars:(off + 1) * bars])
+            env1 = cp.array(env[off * bars:(off + 1) * bars])  # Asegura la longitud 'bars'
             env2 = cp.array(env[(off + 1) * bars:(off + 2) * bars])
             maxvol = cp.log10(1e-4 + env2.max()) * 10
             speedup = cp.clip(interpole(-6, 0.5, 0, 2, maxvol), 0.5, 2)
             w = sigmoid(speed * speedup * (loc - 0.5))
             denv = (1 - w) * env1 + w * env2
-            denv *= smooth
-            denvs.append(cp.asnumpy(denv))  # Para compatibilidad con Cairo
+            denv *= smooth  # Asegúrate de que `smooth` coincida con las dimensiones aquí.
+            denvs.append(cp.asnumpy(denv))  # Para compatibilidad con Cairo 
         draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
 
     audio_cmd = []
