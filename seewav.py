@@ -9,7 +9,7 @@ import cairo
 import cupy as cp  # CuPy para cálculos en GPU
 import numpy as np  # Necesario para interoperabilidad y formato final
 import tqdm
-import time  # Nuevo import para medir el tiempo
+import time
 
 _is_main = False
 
@@ -66,12 +66,25 @@ def sigmoid(x):
     return 1 / (1 + cp.exp(-x))
 
 
+def sliding_window_view_manual(arr, window_shape, step=1):
+    """
+    Manual implementation of sliding window for CuPy arrays.
+    """
+    n = arr.shape[0]
+    stride = step
+    num_windows = (n - window_shape) // stride + 1
+    windows = cp.zeros((num_windows, window_shape), dtype=arr.dtype)
+    for i in range(num_windows):
+        windows[i] = arr[i * stride:i * stride + window_shape]
+    return windows
+
+
 def envelope_gpu(wav, window, stride):
     """
     Extract the envelope of the waveform `wav` (float[samples]) using GPU.
     """
     wav = cp.pad(wav, window // 2)
-    frames = cp.lib.stride_tricks.sliding_window_view(wav, window)[::stride]
+    frames = sliding_window_view_manual(wav, window, stride)
     out = cp.maximum(frames, 0).mean(axis=1)
     out = 1.9 * (sigmoid(2.5 * out) - 0.5)
     return out
@@ -280,4 +293,3 @@ def main():
 if __name__ == "__main__":
     _is_main = True
     main()
-
