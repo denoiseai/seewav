@@ -51,7 +51,7 @@ def read_audio(audio, seek=None, duration=None):
     command += ['-loglevel', 'panic']
     if seek is not None:
         command += ['-ss', str(seek)]
-    command += ['-i', audio]
+    command += ['-i', str(audio)]
     if duration is not None:
         command += ['-t', str(duration)]
     command += ['-f', 'f32le']
@@ -68,14 +68,14 @@ def sigmoid(x):
 
 def envelope_gpu(wav, window, stride):
     """
-    Extract the envelope of the waveform `wav` (float[samples]) using GPU.
+    Extrae la envolvente de la forma de onda `wav` utilizando la GPU.
+    Preserva la calidad al no realizar aproximaciones que puedan degradarla.
     """
     wav = cp.pad(wav, window // 2)
-    out = []
-    for off in range(0, len(wav) - window, stride):
-        frame = wav[off:off + window]
-        out.append(cp.maximum(frame, 0).mean())
-    out = cp.array(out)
+    shape = ((len(wav) - window) // stride + 1, window)
+    strides = (wav.strides[0] * stride, wav.strides[0])
+    frames = cp.lib.stride_tricks.as_strided(wav, shape=shape, strides=strides)
+    out = cp.maximum(frames, 0).mean(axis=1)
     out = 1.9 * (sigmoid(2.5 * out) - 0.5)
     return out
 
@@ -155,37 +155,72 @@ def visualize(audio,
     window = int(sr * time / bars)
     stride = int(window / oversample)
 
+    # Convertir wavs a CuPy arrays y procesar la envolvente en GPU
     envs = []
     for wav in wavs:
-        env = envelope_gpu(cp.array(wav), window, stride)
+        wav_gpu = cp.array(wav)
+        env = envelope_gpu(wav_gpu, window, stride)
         env = cp.pad(env, (bars // 2, 2 * bars))
-        envs.append(cp.asnumpy(env))  # Convertimos a NumPy para compatibilidad con Cairo
+        envs.append(env)  # Mantener en CuPy para procesamiento posterior
 
     duration = len(wavs[0]) / sr
     frames = int(rate * duration)
-    smooth = np.hanning(bars)
+    smooth = cp.hanning(bars)
 
     print("Generating the frames...")
-    for idx in tqdm.tqdm(range(frames), unit=" frames", ncols=80):
-        pos = (((idx / rate)) * sr) / stride / bars
-        off = int(pos)
-        loc = pos - off
-        denvs = []
-        for env in envs:
-            env1 = cp.array(env[off * bars:(off + 1) * bars])  # Asegúrate de que sea CuPy array
-            env2 = cp.array(env[(off + 1) * bars:(off + 2) * bars])  # También CuPy array
-            maxvol = math.log10(1e-4 + env2.max()) * 10
-            speedup = np.clip(interpole(-6, 0.5, 0, 2, maxvol), 0.5, 2)
-            w = cp.array(sigmoid(speed * speedup * (loc - 0.5)))  # Convierte a CuPy si no lo es
-            denv = (1 - w) * env1 + w * env2  # Todas operaciones con CuPy
-            denv *= cp.array(smooth)  # smooth también debería estar en CuPy
-            denvs.append(cp.asnumpy(denv))  # Convierte a NumPy para dibujar
-        draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
+
+    # Dividir el proceso en 10 partes y utilizar CuPy Streams
+    num_parts = 10
+    frames_per_part = frames // num_parts
+    remaining_frames = frames % num_parts
+
+    streams = [cp.cuda.Stream() for _ in range(num_parts)]
+
+    # Crear una lista para almacenar los resultados de cada parte
+    results = [None] * num_parts
+
+    def process_part(part_idx):
+        stream = streams[part_idx]
+        start_frame = part_idx * frames_per_part
+        end_frame = start_frame + frames_per_part
+        if part_idx == num_parts - 1:
+            end_frame += remaining_frames  # Añadir los frames restantes al último lote
+
+        with stream:
+            for idx in range(start_frame, end_frame):
+                pos = (((idx / rate)) * sr) / stride / bars
+                off = int(pos)
+                loc = pos - off
+                denvs = []
+                for env in envs:
+                    env1 = env[off * bars:(off + 1) * bars]
+                    env2 = env[(off + 1) * bars:(off + 2) * bars]
+                    maxvol = cp.log10(1e-4 + env2.max()) * 10
+                    maxvol = maxvol.item()  # Convertir a escalar de Python
+                    speedup = max(0.5, min(2, interpole(-6, 0.5, 0, 2, maxvol)))
+                    w = sigmoid(speed * speedup * (loc - 0.5))
+                    denv = (1 - w) * env1 + w * env2
+                    denv *= smooth
+                    denvs.append(cp.asnumpy(denv))
+                draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
+
+    # Lanzar los procesos en paralelo
+    import threading
+
+    threads = []
+    for i in range(num_parts):
+        t = threading.Thread(target=process_part, args=(i,))
+        t.start()
+        threads.append(t)
+
+    # Esperar a que todos los threads terminen
+    for t in threads:
+        t.join()
 
     audio_cmd = []
     if seek is not None:
         audio_cmd += ["-ss", str(seek)]
-    audio_cmd += ["-i", audio.resolve()]
+    audio_cmd += ["-i", str(audio.resolve())]
     if duration is not None:
         audio_cmd += ["-t", str(duration)]
     print("Encoding the animation video... ")
@@ -194,7 +229,7 @@ def visualize(audio,
         str(rate), "-f", "image2", "-s", f"{size[0]}x{size[1]}", "-i", "%06d.png"
     ] + audio_cmd + [
         "-c:a", "aac", "-vcodec", "h264_nvenc", "-crf", "10", "-pix_fmt", "yuv420p",
-        out.resolve()
+        str(out.resolve())
     ],
            check=True,
            cwd=tmp)
@@ -275,6 +310,7 @@ def main():
                   bg_color=[1. * bool(args.white)] * 3,
                   size=(args.width, args.height),
                   stereo=args.stereo)
+        print(f"Video saved to {args.out.resolve()}")
 
 
 if __name__ == "__main__":
