@@ -5,11 +5,11 @@ import subprocess as sp
 import sys
 import tempfile
 from pathlib import Path
+
 import cairo
 import cupy as cp  # CuPy para cálculos en GPU
 import numpy as np  # Necesario para interoperabilidad y formato final
 import tqdm
-import time
 
 _is_main = False
 
@@ -66,32 +66,17 @@ def sigmoid(x):
     return 1 / (1 + cp.exp(-x))
 
 
-kernel_code_fusion = '''
-extern "C" __global__
-void compute_envelope_fusion(const float* __restrict__ wav, float* __restrict__ out, int n, int window, int stride) {
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    if (idx >= n) return;
-
-    float sum = 0.0f;
-    for (int i = 0; i < window; i++) {
-        int pos = idx * stride + i;
-        sum += max(0.0f, wav[pos]);
-    }
-    float envelope = 1.9f * (1.0f / (1.0f + expf(-2.5f * (sum / window))) - 0.5f);
-    out[idx] = envelope;
-}
-'''
-
-kernel_fusion = cp.RawKernel(kernel_code_fusion, 'compute_envelope_fusion')
-
-
-def envelope_gpu_optimized(wav, window, stride):
-    n = (wav.size - window) // stride + 1
-    out = cp.zeros(n, dtype=cp.float32)
-    threads_per_block = 256
-    blocks = (n + threads_per_block - 1) // threads_per_block
-
-    kernel_fusion((blocks,), (threads_per_block,), (wav, out, wav.size, window, stride))
+def envelope_gpu(wav, window, stride):
+    """
+    Extract the envelope of the waveform `wav` (float[samples]) using GPU.
+    """
+    wav = cp.pad(wav, window // 2)
+    out = []
+    for off in range(0, len(wav) - window, stride):
+        frame = wav[off:off + window]
+        out.append(cp.maximum(frame, 0).mean())
+    out = cp.array(out)
+    out = 1.9 * (sigmoid(2.5 * out) - 0.5)
     return out
 
 
@@ -138,8 +123,8 @@ def visualize(audio,
               out,
               seek=None,
               duration=None,
-              rate=30,
-              bars=30,
+              rate=60,
+              bars=50,
               speed=4,
               time=0.4,
               oversample=3,
@@ -157,7 +142,7 @@ def visualize(audio,
 
     wavs = []
     if stereo:
-        assert wav.shape[0] == 2, 'Stereo requires stereo input audio.'
+        assert wav.shape[0] == 2, 'stereo requires stereo audio file'
         wavs.append(wav[0])
         wavs.append(wav[1])
     else:
@@ -172,44 +157,30 @@ def visualize(audio,
 
     envs = []
     for wav in wavs:
-        env = envelope_gpu_optimized(cp.array(wav), window, stride)
-        env = cp.pad(env, (0, 2 * bars))  # Ajustar padding
-        envs.append(cp.asnumpy(env))  # Convertimos a NumPy para Cairo
+        env = envelope_gpu(cp.array(wav), window, stride)
+        env = cp.pad(env, (bars // 2, 2 * bars))
+        envs.append(cp.asnumpy(env))  # Convertimos a NumPy para compatibilidad con Cairo
 
     duration = len(wavs[0]) / sr
     frames = int(rate * duration)
+    smooth = np.hanning(bars)
 
     print("Generating the frames...")
-    smooth = cp.hanning(bars)
     for idx in tqdm.tqdm(range(frames), unit=" frames", ncols=80):
-        pos = idx * bars
+        pos = (((idx / rate)) * sr) / stride / bars
         off = int(pos)
+        loc = pos - off
         denvs = []
         for env in envs:
-            if off + 1 + bars > len(env):
-                break
-
-            env1 = cp.array(env[off:off + bars])
-            env2 = cp.array(env[off + 1:off + 1 + bars])
-
-            maxvol = cp.log10(1e-4 + env2.max()) * 10
-            maxvol = maxvol.item()  # Convertir a escalar de Python
-
-            # Reemplaza cp.clip por max y min
-            speedup = max(0.5, min(2, interpole(-6, 0.5, 0, 2, maxvol)))
-
-            loc = 0
-            w = sigmoid(speed * speedup * (loc - 0.5))
-
-            denv = (1 - w) * env1 + w * env2
-            denv *= smooth
-            denvs.append(cp.asnumpy(denv))
-
-        if not denvs:
-            continue
-
+            env1 = cp.array(env[off * bars:(off + 1) * bars])  # Asegúrate de que sea CuPy array
+            env2 = cp.array(env[(off + 1) * bars:(off + 2) * bars])  # También CuPy array
+            maxvol = math.log10(1e-4 + env2.max()) * 10
+            speedup = np.clip(interpole(-6, 0.5, 0, 2, maxvol), 0.5, 2)
+            w = cp.array(sigmoid(speed * speedup * (loc - 0.5)))  # Convierte a CuPy si no lo es
+            denv = (1 - w) * env1 + w * env2  # Todas operaciones con CuPy
+            denv *= cp.array(smooth)  # smooth también debería estar en CuPy
+            denvs.append(cp.asnumpy(denv))  # Convierte a NumPy para dibujar
         draw_env(denvs, tmp / f"{idx:06d}.png", (fg_color, fg_color2), bg_color, size)
-
 
     audio_cmd = []
     if seek is not None:
@@ -239,7 +210,6 @@ def parse_color(colorstr):
 
 
 def main():
-    start_time = time.time()  # Inicio de medición de tiempo
     parser = argparse.ArgumentParser(
         'seewav', description="Generate a nice mp4 animation from an audio file.")
     parser.add_argument("-r", "--rate", type=int, default=60, help="Video framerate.")
@@ -305,8 +275,6 @@ def main():
                   bg_color=[1. * bool(args.white)] * 3,
                   size=(args.width, args.height),
                   stereo=args.stereo)
-    end_time = time.time()  # Fin de medición de tiempo
-    print(f"Execution time: {end_time - start_time:.2f} seconds")  # Imprimir tiempo total
 
 
 if __name__ == "__main__":
