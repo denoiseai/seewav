@@ -66,27 +66,31 @@ def sigmoid(x):
     return 1 / (1 + cp.exp(-x))
 
 
-def sliding_window_view_manual(arr, window_shape, step=1):
-    """
-    Manual implementation of sliding window for CuPy arrays.
-    """
-    n = arr.shape[0]
-    stride = step
-    num_windows = (n - window_shape) // stride + 1
-    windows = cp.zeros((num_windows, window_shape), dtype=arr.dtype)
-    for i in range(num_windows):
-        windows[i] = arr[i * stride:i * stride + window_shape]
-    return windows
+kernel_code = '''
+extern "C" __global__
+void compute_envelope(const float* __restrict__ wav, float* __restrict__ out, int n, int window, int stride) {
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx >= n) return;
+
+    float sum = 0.0f;
+    for (int i = 0; i < window; i++) {
+        int pos = idx * stride + i;
+        sum += max(0.0f, wav[pos]);
+    }
+    out[idx] = 1.9f * (1.0f / (1.0f + expf(-2.5f * (sum / window))) - 0.5f);
+}
+'''
+
+kernel = cp.RawKernel(kernel_code, 'compute_envelope')
 
 
-def envelope_gpu(wav, window, stride):
-    """
-    Extract the envelope of the waveform `wav` (float[samples]) using GPU.
-    """
-    wav = cp.pad(wav, window // 2)
-    frames = sliding_window_view_manual(wav, window, stride)
-    out = cp.maximum(frames, 0).mean(axis=1)
-    out = 1.9 * (sigmoid(2.5 * out) - 0.5)
+def envelope_gpu_optimized(wav, window, stride):
+    n = (wav.size - window) // stride + 1
+    out = cp.zeros(n, dtype=cp.float32)
+    threads_per_block = 256
+    blocks = (n + threads_per_block - 1) // threads_per_block
+
+    kernel((blocks,), (threads_per_block,), (wav, out, wav.size, window, stride))
     return out
 
 
@@ -167,9 +171,10 @@ def visualize(audio,
 
     envs = []
     for wav in wavs:
-        env = envelope_gpu(cp.array(wav), window, stride)
-        env = cp.pad(env, (bars // 2, 2 * bars))
-        envs.append(cp.asnumpy(env))  # Convertimos a NumPy para Cairo
+        with cp.cuda.Stream(non_blocking=True):
+            env = envelope_gpu_optimized(cp.array(wav), window, stride)
+            env = cp.pad(env, (bars // 2, 2 * bars))
+            envs.append(cp.asnumpy(env))  # Convertir a NumPy para Cairo
 
     duration = len(wavs[0]) / sr
     frames = int(rate * duration)
@@ -293,3 +298,4 @@ def main():
 if __name__ == "__main__":
     _is_main = True
     main()
+
