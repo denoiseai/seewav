@@ -195,7 +195,7 @@ def visualize(audio,
             env2 = cp.stack([env[i:i + bars] for i in idx2.get()])
 
             maxvol = cp.log10(1e-4 + env2.max(axis=1)) * 10
-            maxvol = maxvol.get()  # Convertir a NumPy array
+            #maxvol = maxvol.get()  # Convertir a NumPy array
             speedup = np.clip(interpole(-6, 0.5, 0, 2, maxvol), 0.5, 2)
 
             w = sigmoid(speed * speedup * (loc - 0.5))
